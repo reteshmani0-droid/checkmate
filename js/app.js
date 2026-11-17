@@ -5,9 +5,10 @@
  * `render()`. That keeps selection, review, the bot's turn and the clock from ever disagreeing.
  */
 import { applyMove, canUndo, clearSavedGame, createGame, currentIds, currentPosition, flag, isHumanTurn, lastMove, loadConfig, loadSettings, loadStats, recordResult, resign, restoreGame, saveConfig, saveGame, saveSettings, savedGame, toPgn, turn, undo, } from './game.js';
-import { clonePosition, fromUci, hasLegalMove, inCheck, legalMovesFrom, makeMove, other, positionFromFen, toFen, toUci, } from './rules.js';
+import { clonePosition, fromUci, hasLegalMove, inCheck, legalMovesFrom, makeMove, other, positionFromFen, START_FEN, toFen, toUci, } from './rules.js';
 import { chooseMove, hintMove } from './bot.js';
 import { createRng } from './rng.js';
+import { makeCode, host, guest } from './net.js';
 import { LEVELS, THEMES, TIME_CONTROLS, applyTheme, themeOf } from './themes.js';
 import { Board } from './board.js';
 import { pieceSvg } from './piece-art.js';
@@ -33,6 +34,15 @@ const state = {
     botToken: 0,
     resultShown: false,
     recorded: false,
+    /** online-play state */
+    online: {
+        role: null,
+        code: null,
+        connection: null,
+        handle: null,
+        disconnected: false,
+        waiting: false,
+    },
 };
 let worker = null;
 let workerBroken = false;
@@ -180,7 +190,9 @@ function render() {
     applySettings();
     $('modeLabel').textContent = game.config.mode === 'bot'
         ? `Bot · ${LEVELS[game.config.level - 1].name}`
-        : 'Pass & play';
+        : game.config.mode === 'online'
+            ? 'Online'
+            : 'Pass & play';
     renderStatus();
     renderSeats();
     renderBoard();
@@ -265,6 +277,11 @@ function materialLead(game) {
 function seatName(game, side) {
     if (game.config.mode === 'friend') {
         return { name: sideName(side), meta: turn(game) === side ? 'To move' : 'Waiting' };
+    }
+    if (game.config.mode === 'online') {
+        if (side === game.human)
+            return { name: 'You', meta: 'Playing ' + sideName(side) };
+        return { name: 'Opponent', meta: 'Playing ' + sideName(side) };
     }
     if (side === game.human)
         return { name: 'You', meta: 'Playing ' + sideName(side) };
@@ -405,7 +422,8 @@ function renderHome() {
         button.setAttribute('aria-selected', String(button.dataset.mode === config.mode));
     }
     $('botOptions').hidden = config.mode !== 'bot';
-    $('friendOptions').hidden = config.mode === 'bot';
+    $('friendOptions').hidden = config.mode !== 'friend';
+    $('onlineOptions').hidden = config.mode !== 'online';
     $('levelCards').innerHTML = LEVELS.map(level => `
         <button class="level ${config.level === level.level ? 'is-on' : ''}" data-level="${level.level}">
             <span class="level__badge">${level.level}</span>
@@ -475,6 +493,40 @@ function resetGameFlags() {
     state.recorded = false;
     state.botToken++;
 }
+let onlinePingTimer = null;
+let onlineWatchdog = null;
+function clearOnlineTimers() {
+    if (onlinePingTimer !== null) {
+        window.clearInterval(onlinePingTimer);
+        onlinePingTimer = null;
+    }
+    if (onlineWatchdog !== null) {
+        window.clearTimeout(onlineWatchdog);
+        onlineWatchdog = null;
+    }
+}
+function resetOnlineWatchdog() {
+    if (onlineWatchdog !== null)
+        window.clearTimeout(onlineWatchdog);
+    onlineWatchdog = window.setTimeout(() => markDisconnected(), 12000);
+}
+function cleanupOnline() {
+    clearOnlineTimers();
+    try {
+        state.online.connection?.close();
+    }
+    catch { /* ignore */ }
+    try {
+        state.online.handle?.cancel();
+    }
+    catch { /* ignore */ }
+    state.online.role = null;
+    state.online.code = null;
+    state.online.connection = null;
+    state.online.handle = null;
+    state.online.disconnected = false;
+    state.online.waiting = false;
+}
 function startGame(config) {
     state.config = { ...config };
     saveConfig(state.config);
@@ -486,7 +538,211 @@ function startGame(config) {
 }
 function rematch() {
     closeDialog();
+    if (state.game.config.mode === 'online') {
+        onlineRematch();
+        return;
+    }
     startGame(state.game.config);
+}
+function startOnlineGame(humanSide, minutes) {
+    const config = { mode: 'online', level: 2, side: humanSide, minutes, autoFlip: false };
+    state.config = { ...config };
+    state.game = createGame(config, START_FEN, humanSide);
+    state.game.flipped = humanSide === 'b';
+    resetGameFlags();
+    clearOnlineTimers();
+    resetOnlineWatchdog();
+    onlinePingTimer = window.setInterval(() => {
+        const conn = state.online.connection;
+        if (conn && !state.online.disconnected)
+            conn.send({ t: 'ping' });
+    }, 4000);
+    closeDialog();
+    showScreen('game');
+    render();
+}
+function handleNetMessage(message) {
+    resetOnlineWatchdog();
+    if (message.t === 'ping')
+        return;
+    if (message.t === 'hello') {
+        const hostSide = message.hostSide;
+        const humanSide = hostSide === 'w' ? 'b' : 'w';
+        startOnlineGame(humanSide, message.minutes);
+        return;
+    }
+    const game = state.game;
+    if (!game || game.config.mode !== 'online')
+        return;
+    if (message.t === 'move') {
+        if (game.outcome)
+            return;
+        const move = fromUci(currentPosition(game), message.uci);
+        if (!move)
+            return;
+        // sync mover's clock
+        const mover = move.c;
+        game.clocks[mover] = message.clocks[mover];
+        commitMove(move, true, true);
+        return;
+    }
+    if (message.t === 'resign') {
+        if (game.outcome)
+            return;
+        const loser = other(game.human);
+        resign(game, loser);
+        render();
+        finish();
+        return;
+    }
+    if (message.t === 'flag') {
+        if (game.outcome)
+            return;
+        flag(game, message.loser);
+        render();
+        finish();
+        return;
+    }
+    if (message.t === 'rematch') {
+        onlineDoRematch();
+        return;
+    }
+    if (message.t === 'bye') {
+        state.online.disconnected = true;
+        toast('Opponent left the game');
+        return;
+    }
+}
+function handleNetClose() { markDisconnected(); }
+function markDisconnected() {
+    clearOnlineTimers();
+    if (state.game?.config.mode === 'online' && !state.online.disconnected) {
+        state.online.disconnected = true;
+        toast('Opponent disconnected');
+    }
+}
+function handleNetError(error) {
+    /* ignore */
+    if (error.toLowerCase().includes('unavailable') || error.toLowerCase().includes('taken')) {
+        toast('That code is not available. Try again.');
+        cleanupOnline();
+        showScreen('home');
+        return;
+    }
+    // connection dropped
+    if (state.online.connection) {
+        markDisconnected();
+    }
+}
+function onlineRematch() {
+    const conn = state.online.connection;
+    if (conn)
+        conn.send({ t: 'rematch' });
+    onlineDoRematch();
+}
+function onlineDoRematch() {
+    const game = state.game;
+    const minutes = game.config.minutes;
+    const humanSide = game.human === 'w' ? 'b' : 'w';
+    const config = { mode: 'online', level: 2, side: humanSide, minutes, autoFlip: false };
+    state.config = { ...config };
+    state.game = createGame(config, START_FEN, humanSide);
+    state.game.flipped = humanSide === 'b';
+    resetGameFlags();
+    showScreen('game');
+    render();
+}
+function sendOnlineMove(move) {
+    const conn = state.online.connection;
+    if (!conn)
+        return;
+    const game = state.game;
+    conn.send({ t: 'move', uci: toUci(move), clocks: { ...game.clocks } });
+}
+function openCreateGame() {
+    const config = state.config;
+    const dialog = openDialog(`
+        ${dialogHeader('Create a game', 'Choose a time control, then share the code with a friend.')}
+        <div class="online__create">
+            <div class="field">
+                <span class="label">Time</span>
+                <div class="chips" id="onlineTimeChips"></div>
+            </div>
+            <div class="field">
+                <span class="label">You play</span>
+                <div class="seg seg--sm" id="onlineSideSeg" role="tablist">
+                    <button class="seg__item" data-side="w" role="tab">White</button>
+                    <button class="seg__item" data-side="b" role="tab">Black</button>
+                    <button class="seg__item" data-side="random" role="tab">Random</button>
+                </div>
+            </div>
+            <button class="btn btn--primary btn--block btn--lg" id="createConfirm">Create</button>
+        </div>`, { dimissible: true });
+    const timeHost = dialog.querySelector('#onlineTimeChips');
+    const controls = [0, 1, 3, 5, 10, 15];
+    const labels = { 0: 'No clock', 1: '1 min', 3: '3 min', 5: '5 min', 10: '10 min', 15: '15 min' };
+    timeHost.innerHTML = controls.map(m => `<button class="chip ${config.minutes === m ? 'is-on' : ''}" data-minutes="${m}"><span class="chip__label">${labels[m]}</span></button>`).join('');
+    for (const button of timeHost.querySelectorAll('[data-minutes]')) {
+        button.addEventListener('click', () => {
+            config.minutes = Number(button.dataset.minutes);
+            for (const b of timeHost.querySelectorAll('.chip'))
+                b.classList.toggle('is-on', b === button);
+        });
+    }
+    const sideSeg = dialog.querySelector('#onlineSideSeg');
+    let chosenSide = config.side === 'b' || config.side === 'random' ? config.side : 'w';
+    for (const button of sideSeg.querySelectorAll('[data-side]')) {
+        button.classList.toggle('is-on', button.dataset.side === chosenSide);
+        button.addEventListener('click', () => {
+            chosenSide = button.dataset.side;
+            for (const b of sideSeg.querySelectorAll('.seg__item'))
+                b.classList.toggle('is-on', b === button);
+        });
+    }
+    dialog.querySelector('#createConfirm')?.addEventListener('click', () => {
+        closeDialog();
+        startHosting(chosenSide, config.minutes);
+    });
+}
+function startHosting(sideChoice, minutes) {
+    cleanupOnline();
+    const code = makeCode();
+    state.online.role = 'host';
+    state.online.code = code;
+    state.online.waiting = true;
+    const side = sideChoice === 'random' ? (Math.random() < 0.5 ? 'w' : 'b') : sideChoice;
+    const handle = host(code, {
+        onOpen: (connection) => {
+            state.online.connection = connection;
+            state.online.waiting = false;
+            window.setTimeout(() => {
+                connection.send({ t: 'hello', minutes, hostSide: side });
+                startOnlineGame(side, minutes);
+                try {
+                    closeDialog();
+                }
+                catch { /* ignore */ }
+            }, 200);
+        },
+        onMessage: message => handleNetMessage(message),
+        onClose: () => handleNetClose(),
+        onError: error => handleNetError(error),
+    });
+    state.online.handle = handle;
+    const link = `${location.origin}${location.pathname}?room=${code}`;
+    const dialog = openDialog(`
+        ${dialogHeader('Waiting for a friend', 'Share this code or link. The game starts when they join.')}
+        <div class="online__wait">
+            <div class="online__code">${code}</div>
+            <button class="btn btn--subtle btn--block" id="copyCodeBtn">Copy link</button>
+            <button class="btn btn--ghost btn--block" id="cancelHostBtn">Cancel</button>
+        </div>`, { dimissible: false });
+    dialog.querySelector('#copyCodeBtn')?.addEventListener('click', () => copyText(link, 'Link copied'));
+    dialog.querySelector('#cancelHostBtn')?.addEventListener('click', () => {
+        cleanupOnline();
+        closeDialog();
+        showScreen('home');
+    });
 }
 function continueSaved() {
     const saved = savedGame();
@@ -571,7 +827,7 @@ function onDrop(from, to) {
     onTap(to);
 }
 /** Play a move: rules, sound, save, then whoever moves next. */
-function commitMove(move, byBot) {
+function commitMove(move, byBot, remote = false) {
     const game = state.game;
     const before = currentPosition(game);
     const after = clonePosition(before);
@@ -582,7 +838,9 @@ function commitMove(move, byBot) {
     state.selected = null;
     state.targets = [];
     state.review = null;
-    if (!byBot)
+    if (remote)
+        play(evaluateSound(move, checked && !mate));
+    else if (!byBot)
         play(evaluateSound(move, checked && !mate));
     else if (move.capture || move.promo)
         play(evaluateSound(move, false));
@@ -590,8 +848,11 @@ function commitMove(move, byBot) {
     if (game.outcome)
         finish();
     else {
-        saveGame(game);
-        if (!byBot || game.config.mode === 'friend')
+        if (game.config.mode !== 'online')
+            saveGame(game);
+        if (game.config.mode === 'online' && !byBot && !remote)
+            sendOnlineMove(move);
+        if ((!byBot || game.config.mode === 'friend') && game.config.mode !== 'online')
             maybeBotMove();
     }
 }
@@ -670,6 +931,11 @@ function tick(now) {
             flag(game, side);
             render();
             finish();
+            if (game.config.mode === 'online') {
+                const conn = state.online.connection;
+                if (conn)
+                    conn.send({ t: 'flag', loser: side });
+            }
         }
     }
     requestAnimationFrame(tick);
@@ -812,6 +1078,57 @@ function confirmDialog(title, body, confirmLabel, danger, onConfirm) {
     });
     dialog.querySelector('[data-no]')?.addEventListener('click', () => closeDialog());
 }
+function openJoinGame(prefill) {
+    const dialog = openDialog(`
+        ${dialogHeader('Join a game', 'Enter the code your friend shared.')}
+        <div class="online__join">
+            <input class="input" id="joinCodeInput" type="text" maxlength="8" placeholder="ABCDEF" autocomplete="off" spellcheck="false">
+            <button class="btn btn--primary btn--block btn--lg" id="joinConfirm">Join</button>
+            <button class="btn btn--ghost btn--block" id="joinCancel">Cancel</button>
+        </div>`, { dimissible: true });
+    const input = dialog.querySelector('#joinCodeInput');
+    if (prefill)
+        input.value = prefill;
+    input.focus();
+    input.addEventListener('input', () => { input.value = input.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); });
+    dialog.querySelector('#joinConfirm')?.addEventListener('click', () => {
+        const code = input.value.trim();
+        if (code.length < 4) {
+            toast('Enter a valid code');
+            return;
+        }
+        closeDialog();
+        startJoining(code);
+    });
+    dialog.querySelector('#joinCancel')?.addEventListener('click', () => closeDialog());
+}
+function startJoining(code) {
+    cleanupOnline();
+    state.online.role = 'guest';
+    state.online.code = code;
+    state.online.waiting = true;
+    const handle = guest(code, {
+        onOpen: (connection) => {
+            state.online.connection = connection;
+            state.online.waiting = false;
+        },
+        onMessage: message => handleNetMessage(message),
+        onClose: () => handleNetClose(),
+        onError: error => handleNetError(error),
+    });
+    state.online.handle = handle;
+    openDialog(`
+        ${dialogHeader('Connecting…', 'Joining room ' + code.toUpperCase())}
+        <div class="online__wait">
+            <button class="btn btn--ghost btn--block" id="cancelJoinBtn">Cancel</button>
+        </div>`, { dimissible: false });
+    const dlg = document.querySelector('#overlay .dialog');
+    dlg.querySelector('#cancelJoinBtn')?.addEventListener('click', () => {
+        cleanupOnline();
+        closeDialog();
+        showScreen('home');
+    });
+}
 function openMenu() {
     const settings = state.settings;
     const dialog = openDialog(`
@@ -896,7 +1213,8 @@ function openMenu() {
 function bindHome() {
     for (const button of document.querySelectorAll('#modeSeg [data-mode]')) {
         button.addEventListener('click', () => {
-            state.config.mode = button.dataset.mode === 'friend' ? 'friend' : 'bot';
+            const m = button.dataset.mode;
+            state.config.mode = m === 'friend' ? 'friend' : m === 'online' ? 'online' : 'bot';
             saveConfig(state.config);
             play('click');
             renderHome();
@@ -925,6 +1243,16 @@ function bindHome() {
         play('click');
         continueSaved();
     });
+    $('createGameBtn').addEventListener('click', () => {
+        unlockAudio();
+        play('click');
+        openCreateGame();
+    });
+    $('joinGameBtn').addEventListener('click', () => {
+        unlockAudio();
+        play('click');
+        openJoinGame();
+    });
     $('soundToggle').addEventListener('click', () => {
         state.settings.sound = !state.settings.sound;
         saveSettings(state.settings);
@@ -938,6 +1266,14 @@ function bindHome() {
 function bindGame() {
     $('backBtn').addEventListener('click', () => {
         const game = state.game;
+        if (game.config.mode === 'online') {
+            const conn = state.online.connection;
+            if (conn)
+                conn.send({ t: 'bye' });
+            cleanupOnline();
+            showScreen('home');
+            return;
+        }
         if (!game.outcome && game.plies.length && state.settings.confirm) {
             confirmDialog('Leave this game?', 'It is saved, so you can pick it up again.', 'Save and leave', false, () => {
                 saveGame(game);
@@ -989,7 +1325,14 @@ function bindGame() {
         const loser = game.config.mode === 'bot' ? game.human : turn(game);
         confirmDialog('Resign?', game.config.mode === 'bot'
             ? 'The bot takes the win.'
-            : `${sideName(loser)} gives up the game.`, 'Resign', true, () => {
+            : game.config.mode === 'online'
+                ? 'You give up the game.'
+                : `${sideName(loser)} gives up the game.`, 'Resign', true, () => {
+            if (game.config.mode === 'online') {
+                const conn = state.online.connection;
+                if (conn)
+                    conn.send({ t: 'resign' });
+            }
             resign(game, loser);
             render();
             finish();
@@ -1070,6 +1413,13 @@ function boot() {
     bindGame();
     bindKeys();
     applySettings();
+    const roomParam = new URLSearchParams(location.search).get('room');
+    if (roomParam) {
+        state.config.mode = 'online';
+        saveConfig(state.config);
+        // open join dialog after boot
+        window.setTimeout(() => openJoinGame(roomParam), 50);
+    }
     showScreen('home');
     requestAnimationFrame(tick);
     document.addEventListener('pointerdown', () => unlockAudio(), { once: true });

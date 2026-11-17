@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#302E2B">
-    <meta name="description" content="Checkmate — play chess against a friend on this device, or against a bot at four strengths.">
+    <meta name="description" content="Checkmate — play chess against a friend on this device or online, or against a bot at four strengths.">
     <title>Checkmate — play chess</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2381B64C'/%3E%3Ctext x='32' y='47' font-size='42' text-anchor='middle' fill='%23142109'%3E%E2%99%9E%3C/text%3E%3C/svg%3E">
     <link rel="stylesheet" href="style.css">
@@ -19,7 +19,7 @@
                 <div class="brand__mark" id="brandMark"></div>
                 <div class="brand__text">
                     <h1>Checkmate</h1>
-                    <p>Play a friend on this device, or take on the bot.</p>
+                    <p>Play a friend here, online, or take on the bot.</p>
                 </div>
             </header>
 
@@ -29,6 +29,7 @@
                     <div class="seg" id="modeSeg" role="tablist" aria-label="Opponent">
                         <button class="seg__item" data-mode="bot" role="tab">Bot</button>
                         <button class="seg__item" data-mode="friend" role="tab">A friend</button>
+                        <button class="seg__item" data-mode="online" role="tab">Online</button>
                     </div>
                 </div>
 
@@ -51,6 +52,14 @@
                         <span class="switch__track"><span class="switch__knob"></span></span>
                         <span class="switch__text">Turn the board for each player</span>
                     </label>
+                </div>
+
+                <div id="onlineOptions" hidden>
+                    <p class="online__hint">Create a game and share the code, or join one a friend sent you.</p>
+                    <div class="online__actions">
+                        <button class="btn btn--primary" id="createGameBtn">Create a game</button>
+                        <button class="btn btn--subtle" id="joinGameBtn">Join a game</button>
+                    </div>
                 </div>
 
                 <div class="field">
@@ -114,6 +123,7 @@
     <div class="overlay" id="overlay" hidden></div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js" defer></script>
     <script type="module" src="js/app.js"></script>
 </body>
 </html>

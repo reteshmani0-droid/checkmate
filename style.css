@@ -627,6 +627,16 @@ button { font-family: inherit; }
 .menu__themes { display: flex; gap: 6px; }
 .menu__hint { margin-top: 10px; font-size: 11px; color: var(--dim); text-align: center; }
 .menu__hint b { color: var(--muted); font-weight: 700; }
+
+/* ---------------- online */
+.online__hint { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.online__actions { display: flex; gap: 8px; }
+.online__actions .btn { flex: 1; }
+.online__code { font-family: var(--font-mono, monospace); font-size: 28px; font-weight: 800; letter-spacing: 0.18em; text-align: center; padding: 14px; background: var(--surface-2, rgba(255,255,255,0.04)); border: 1px solid var(--border, rgba(255,255,255,0.08)); border-radius: 10px; margin: 8px 0; }
+.online__wait { display: flex; flex-direction: column; gap: 8px; }
+.online__create .field, .online__join { display: flex; flex-direction: column; gap: 8px; }
+.input { background: var(--surface-2, rgba(255,255,255,0.04)); border: 1px solid var(--border, rgba(255,255,255,0.08)); color: var(--text, #eee); border-radius: 8px; padding: 10px 12px; font-size: 16px; letter-spacing: 0.12em; text-transform: uppercase; text-align: center; outline: none; }
+.input:focus { border-color: var(--green, #81B64C); }
 .menu__row input[type="checkbox"] {
     width: 20px;
     height: 20px;

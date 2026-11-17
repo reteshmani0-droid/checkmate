@@ -28,8 +28,10 @@ npx tsc -p .        # or: npm run build
 
 ## What is in it
 
-- **Two ways to play** — against the bot (levels 1–4, or play as White, Black or random) or
-  pass-and-play with an optional board flip after every move.
+- **Three ways to play** — against the bot (levels 1–4, or play as White, Black or random),
+  pass-and-play on this device with an optional board flip after every move, or **online**
+  against a friend: create a game, share the six-letter code (or the link), and play
+  peer-to-peer. No account, no server of ours.
 - **Full rules** — castling, en passant, promotion (with a picker), check, checkmate,
   stalemate, threefold repetition, the fifty-move rule, and draws for insufficient material.
 - **Clocks** — bullet, blitz, rapid or no clock, with tenths under 20 seconds and a flag.

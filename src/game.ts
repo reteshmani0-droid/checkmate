@@ -23,7 +23,7 @@ import {
 import type { BotLevel } from './bot.js';
 import type { ThemeId } from './themes.js';
 
-export type Mode = 'bot' | 'friend';
+export type Mode = 'bot' | 'friend' | 'online';
 export type Side = 'w' | 'b';
 export type SideChoice = Side | 'random';
 
@@ -316,6 +316,7 @@ export function canUndo(game: Game): boolean
 {
     if (!game.plies.length) return false;
     if (game.config.mode === 'friend') return true;
+    if (game.config.mode === 'online') return false;
     return game.plies.some(ply => ply.move.c === game.human);
 }
 

@@ -207,6 +207,8 @@ export function canUndo(game) {
         return false;
     if (game.config.mode === 'friend')
         return true;
+    if (game.config.mode === 'online')
+        return false;
     return game.plies.some(ply => ply.move.c === game.human);
 }
 /**

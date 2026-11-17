@@ -44,11 +44,13 @@ import {
     makeMove,
     other,
     positionFromFen,
+    START_FEN,
     toFen,
     toUci,
 } from './rules.js';
 import { chooseMove, hintMove, type BotLevel } from './bot.js';
 import { createRng } from './rng.js';
+import { makeCode, host, guest, type Connection, type NetMessage } from './net.js';
 import { LEVELS, THEMES, TIME_CONTROLS, applyTheme, themeOf } from './themes.js';
 import { Board } from './board.js';
 import { pieceSvg } from './piece-art.js';
@@ -78,6 +80,15 @@ const state = {
     botToken: 0,
     resultShown: false,
     recorded: false,
+    /** online-play state */
+    online: {
+        role: null as 'host' | 'guest' | null,
+        code: null as string | null,
+        connection: null as Connection | null,
+        handle: null as { peer: any; cancel: () => void } | null,
+        disconnected: false,
+        waiting: false,
+    },
 };
 
 /* ------------------------------------------------------------------ worker */
@@ -261,7 +272,9 @@ function render(): void
 
     $('modeLabel').textContent = game.config.mode === 'bot'
         ? `Bot · ${LEVELS[game.config.level - 1].name}`
-        : 'Pass & play';
+        : game.config.mode === 'online'
+            ? 'Online'
+            : 'Pass & play';
 
     renderStatus();
     renderSeats();
@@ -361,6 +374,11 @@ function seatName(game: Game, side: Side): { name: string; meta: string }
     if (game.config.mode === 'friend')
     {
         return { name: sideName(side), meta: turn(game) === side ? 'To move' : 'Waiting' };
+    }
+    if (game.config.mode === 'online')
+    {
+        if (side === game.human) return { name: 'You', meta: 'Playing ' + sideName(side) };
+        return { name: 'Opponent', meta: 'Playing ' + sideName(side) };
     }
     if (side === game.human) return { name: 'You', meta: 'Playing ' + sideName(side) };
     const level = LEVELS[game.config.level - 1];
@@ -528,7 +546,8 @@ function renderHome(): void
         button.setAttribute('aria-selected', String(button.dataset.mode === config.mode));
     }
     $('botOptions').hidden = config.mode !== 'bot';
-    $('friendOptions').hidden = config.mode === 'bot';
+    $('friendOptions').hidden = config.mode !== 'friend';
+    $('onlineOptions').hidden = config.mode !== 'online';
 
     $('levelCards').innerHTML = LEVELS.map(level => `
         <button class="level ${config.level === level.level ? 'is-on' : ''}" data-level="${level.level}">
@@ -621,6 +640,34 @@ function resetGameFlags(): void
     state.botToken++;
 }
 
+let onlinePingTimer: number | null = null;
+let onlineWatchdog: number | null = null;
+
+function clearOnlineTimers(): void
+{
+    if (onlinePingTimer !== null) { window.clearInterval(onlinePingTimer); onlinePingTimer = null; }
+    if (onlineWatchdog !== null) { window.clearTimeout(onlineWatchdog); onlineWatchdog = null; }
+}
+
+function resetOnlineWatchdog(): void
+{
+    if (onlineWatchdog !== null) window.clearTimeout(onlineWatchdog);
+    onlineWatchdog = window.setTimeout(() => markDisconnected(), 12000);
+}
+
+function cleanupOnline(): void
+{
+    clearOnlineTimers();
+    try { state.online.connection?.close(); } catch { /* ignore */ }
+    try { state.online.handle?.cancel(); } catch { /* ignore */ }
+    state.online.role = null;
+    state.online.code = null;
+    state.online.connection = null;
+    state.online.handle = null;
+    state.online.disconnected = false;
+    state.online.waiting = false;
+}
+
 function startGame(config: Config): void
 {
     state.config = { ...config };
@@ -635,7 +682,243 @@ function startGame(config: Config): void
 function rematch(): void
 {
     closeDialog();
+    if (state.game.config.mode === 'online') { onlineRematch(); return; }
     startGame(state.game.config);
+}
+
+function startOnlineGame(humanSide: 'w' | 'b', minutes: number): void
+{
+    const config: Config = { mode: 'online', level: 2, side: humanSide, minutes, autoFlip: false };
+    state.config = { ...config };
+    state.game = createGame(config, START_FEN, humanSide);
+    state.game.flipped = humanSide === 'b';
+    resetGameFlags();
+    clearOnlineTimers();
+    resetOnlineWatchdog();
+    onlinePingTimer = window.setInterval(() =>
+    {
+        const conn = state.online.connection;
+        if (conn && !state.online.disconnected) conn.send({ t: 'ping' });
+    }, 4000);
+    closeDialog();
+    showScreen('game');
+    render();
+}
+
+function handleNetMessage(message: NetMessage): void
+{
+    resetOnlineWatchdog();
+    if (message.t === 'ping') return;
+    if (message.t === 'hello')
+    {
+        const hostSide = message.hostSide;
+        const humanSide: 'w' | 'b' = hostSide === 'w' ? 'b' : 'w';
+        startOnlineGame(humanSide, message.minutes);
+        return;
+    }
+
+    const game = state.game;
+    if (!game || game.config.mode !== 'online') return;
+
+    if (message.t === 'move')
+    {
+        if (game.outcome) return;
+        const move = fromUci(currentPosition(game), message.uci);
+        if (!move) return;
+        // sync mover's clock
+        const mover: 'w' | 'b' = move.c;
+        game.clocks[mover] = message.clocks[mover];
+        commitMove(move, true, true);
+        return;
+    }
+
+    if (message.t === 'resign')
+    {
+        if (game.outcome) return;
+        const loser: 'w' | 'b' = other(game.human) as 'w' | 'b';
+        resign(game, loser);
+        render();
+        finish();
+        return;
+    }
+
+    if (message.t === 'flag')
+    {
+        if (game.outcome) return;
+        flag(game, message.loser);
+        render();
+        finish();
+        return;
+    }
+
+    if (message.t === 'rematch')
+    {
+        onlineDoRematch();
+        return;
+    }
+
+    if (message.t === 'bye')
+    {
+        state.online.disconnected = true;
+        toast('Opponent left the game');
+        return;
+    }
+}
+
+function handleNetClose(): void { markDisconnected(); }
+
+function markDisconnected(): void
+{
+    clearOnlineTimers();
+    if (state.game?.config.mode === 'online' && !state.online.disconnected)
+    {
+        state.online.disconnected = true;
+        toast('Opponent disconnected');
+    }
+}
+
+function handleNetError(error: string): void
+{
+    /* ignore */
+    if (error.toLowerCase().includes('unavailable') || error.toLowerCase().includes('taken'))
+    {
+        toast('That code is not available. Try again.');
+        cleanupOnline();
+        showScreen('home');
+        return;
+    }
+    // connection dropped
+    if (state.online.connection)
+    {
+        markDisconnected();
+    }
+}
+
+function onlineRematch(): void
+{
+    const conn = state.online.connection;
+    if (conn) conn.send({ t: 'rematch' });
+    onlineDoRematch();
+}
+
+function onlineDoRematch(): void
+{
+    const game = state.game;
+    const minutes = game.config.minutes;
+    const humanSide: 'w' | 'b' = game.human === 'w' ? 'b' : 'w';
+    const config: Config = { mode: 'online', level: 2, side: humanSide, minutes, autoFlip: false };
+    state.config = { ...config };
+    state.game = createGame(config, START_FEN, humanSide);
+    state.game.flipped = humanSide === 'b';
+    resetGameFlags();
+    showScreen('game');
+    render();
+}
+
+function sendOnlineMove(move: Move): void
+{
+    const conn = state.online.connection;
+    if (!conn) return;
+    const game = state.game;
+    conn.send({ t: 'move', uci: toUci(move), clocks: { ...game.clocks } });
+}
+
+function openCreateGame(): void
+{
+    const config = state.config;
+    const dialog = openDialog(`
+        ${dialogHeader('Create a game', 'Choose a time control, then share the code with a friend.')}
+        <div class="online__create">
+            <div class="field">
+                <span class="label">Time</span>
+                <div class="chips" id="onlineTimeChips"></div>
+            </div>
+            <div class="field">
+                <span class="label">You play</span>
+                <div class="seg seg--sm" id="onlineSideSeg" role="tablist">
+                    <button class="seg__item" data-side="w" role="tab">White</button>
+                    <button class="seg__item" data-side="b" role="tab">Black</button>
+                    <button class="seg__item" data-side="random" role="tab">Random</button>
+                </div>
+            </div>
+            <button class="btn btn--primary btn--block btn--lg" id="createConfirm">Create</button>
+        </div>`, { dimissible: true });
+
+    const timeHost = dialog.querySelector<HTMLElement>('#onlineTimeChips')!;
+    const controls = [0, 1, 3, 5, 10, 15];
+    const labels: Record<number, string> = { 0: 'No clock', 1: '1 min', 3: '3 min', 5: '5 min', 10: '10 min', 15: '15 min' };
+    timeHost.innerHTML = controls.map(m => `<button class="chip ${config.minutes === m ? 'is-on' : ''}" data-minutes="${m}"><span class="chip__label">${labels[m]}</span></button>`).join('');
+    for (const button of timeHost.querySelectorAll<HTMLButtonElement>('[data-minutes]'))
+    {
+        button.addEventListener('click', () =>
+        {
+            config.minutes = Number(button.dataset.minutes);
+            for (const b of timeHost.querySelectorAll('.chip')) b.classList.toggle('is-on', b === button);
+        });
+    }
+    const sideSeg = dialog.querySelector<HTMLElement>('#onlineSideSeg')!;
+    let chosenSide: 'w' | 'b' | 'random' = config.side === 'b' || config.side === 'random' ? config.side : 'w';
+    for (const button of sideSeg.querySelectorAll<HTMLButtonElement>('[data-side]'))
+    {
+        button.classList.toggle('is-on', button.dataset.side === chosenSide);
+        button.addEventListener('click', () =>
+        {
+            chosenSide = button.dataset.side as 'w' | 'b' | 'random';
+            for (const b of sideSeg.querySelectorAll('.seg__item')) b.classList.toggle('is-on', b === button);
+        });
+    }
+
+    dialog.querySelector('#createConfirm')?.addEventListener('click', () =>
+    {
+        closeDialog();
+        startHosting(chosenSide, config.minutes);
+    });
+}
+
+function startHosting(sideChoice: 'w' | 'b' | 'random', minutes: number): void
+{
+    cleanupOnline();
+    const code = makeCode();
+    state.online.role = 'host';
+    state.online.code = code;
+    state.online.waiting = true;
+
+    const side: 'w' | 'b' = sideChoice === 'random' ? (Math.random() < 0.5 ? 'w' : 'b') : sideChoice;
+
+    const handle = host(code, {
+        onOpen: (connection) =>
+        {
+            state.online.connection = connection;
+            state.online.waiting = false;
+            window.setTimeout(() =>
+            {
+                connection.send({ t: 'hello', minutes, hostSide: side });
+                startOnlineGame(side, minutes);
+                try { closeDialog(); } catch { /* ignore */ }
+            }, 200);
+        },
+        onMessage: message => handleNetMessage(message),
+        onClose: () => handleNetClose(),
+        onError: error => handleNetError(error),
+    });
+    state.online.handle = handle;
+
+    const link = `${location.origin}${location.pathname}?room=${code}`;
+    const dialog = openDialog(`
+        ${dialogHeader('Waiting for a friend', 'Share this code or link. The game starts when they join.')}
+        <div class="online__wait">
+            <div class="online__code">${code}</div>
+            <button class="btn btn--subtle btn--block" id="copyCodeBtn">Copy link</button>
+            <button class="btn btn--ghost btn--block" id="cancelHostBtn">Cancel</button>
+        </div>`, { dimissible: false });
+
+    dialog.querySelector('#copyCodeBtn')?.addEventListener('click', () => copyText(link, 'Link copied'));
+    dialog.querySelector('#cancelHostBtn')?.addEventListener('click', () =>
+    {
+        cleanupOnline();
+        closeDialog();
+        showScreen('home');
+    });
 }
 
 function continueSaved(): void
@@ -739,7 +1022,7 @@ function onDrop(from: number, to: number): void
 }
 
 /** Play a move: rules, sound, save, then whoever moves next. */
-function commitMove(move: Move, byBot: boolean): void
+function commitMove(move: Move, byBot: boolean, remote = false): void
 {
     const game = state.game;
     const before = currentPosition(game);
@@ -753,15 +1036,17 @@ function commitMove(move: Move, byBot: boolean): void
     state.targets = [];
     state.review = null;
 
-    if (!byBot) play(evaluateSound(move, checked && !mate));
+    if (remote) play(evaluateSound(move, checked && !mate));
+    else if (!byBot) play(evaluateSound(move, checked && !mate));
     else if (move.capture || move.promo) play(evaluateSound(move, false));
 
     render();
     if (game.outcome) finish();
     else
     {
-        saveGame(game);
-        if (!byBot || game.config.mode === 'friend') maybeBotMove();
+        if (game.config.mode !== 'online') saveGame(game);
+        if (game.config.mode === 'online' && !byBot && !remote) sendOnlineMove(move);
+        if ((!byBot || game.config.mode === 'friend') && game.config.mode !== 'online') maybeBotMove();
     }
 }
 
@@ -852,6 +1137,11 @@ function tick(now: number): void
             flag(game, side);
             render();
             finish();
+            if (game.config.mode === 'online')
+            {
+                const conn = state.online.connection;
+                if (conn) conn.send({ t: 'flag', loser: side });
+            }
         }
     }
     requestAnimationFrame(tick);
@@ -1018,6 +1308,65 @@ function confirmDialog(title: string, body: string, confirmLabel: string, danger
     dialog.querySelector('[data-no]')?.addEventListener('click', () => closeDialog());
 }
 
+function openJoinGame(prefill?: string): void
+{
+    const dialog = openDialog(`
+        ${dialogHeader('Join a game', 'Enter the code your friend shared.')}
+        <div class="online__join">
+            <input class="input" id="joinCodeInput" type="text" maxlength="8" placeholder="ABCDEF" autocomplete="off" spellcheck="false">
+            <button class="btn btn--primary btn--block btn--lg" id="joinConfirm">Join</button>
+            <button class="btn btn--ghost btn--block" id="joinCancel">Cancel</button>
+        </div>`, { dimissible: true });
+
+    const input = dialog.querySelector<HTMLInputElement>('#joinCodeInput')!;
+    if (prefill) input.value = prefill;
+    input.focus();
+    input.addEventListener('input', () => { input.value = input.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); });
+
+    dialog.querySelector('#joinConfirm')?.addEventListener('click', () =>
+    {
+        const code = input.value.trim();
+        if (code.length < 4) { toast('Enter a valid code'); return; }
+        closeDialog();
+        startJoining(code);
+    });
+    dialog.querySelector('#joinCancel')?.addEventListener('click', () => closeDialog());
+}
+
+function startJoining(code: string): void
+{
+    cleanupOnline();
+    state.online.role = 'guest';
+    state.online.code = code;
+    state.online.waiting = true;
+
+    const handle = guest(code, {
+        onOpen: (connection) =>
+        {
+            state.online.connection = connection;
+            state.online.waiting = false;
+        },
+        onMessage: message => handleNetMessage(message),
+        onClose: () => handleNetClose(),
+        onError: error => handleNetError(error),
+    });
+    state.online.handle = handle;
+
+    openDialog(`
+        ${dialogHeader('Connecting…', 'Joining room ' + code.toUpperCase())}
+        <div class="online__wait">
+            <button class="btn btn--ghost btn--block" id="cancelJoinBtn">Cancel</button>
+        </div>`, { dimissible: false });
+
+    const dlg = document.querySelector('#overlay .dialog')!;
+    dlg.querySelector('#cancelJoinBtn')?.addEventListener('click', () =>
+    {
+        cleanupOnline();
+        closeDialog();
+        showScreen('home');
+    });
+}
+
 function openMenu(): void
 {
     const settings = state.settings;
@@ -1116,7 +1465,8 @@ function bindHome(): void
     {
         button.addEventListener('click', () =>
         {
-            state.config.mode = button.dataset.mode === 'friend' ? 'friend' : 'bot';
+            const m = button.dataset.mode;
+            state.config.mode = m === 'friend' ? 'friend' : m === 'online' ? 'online' : 'bot';
             saveConfig(state.config);
             play('click');
             renderHome();
@@ -1150,6 +1500,19 @@ function bindHome(): void
         play('click');
         continueSaved();
     });
+
+    $('createGameBtn').addEventListener('click', () =>
+    {
+        unlockAudio();
+        play('click');
+        openCreateGame();
+    });
+    $('joinGameBtn').addEventListener('click', () =>
+    {
+        unlockAudio();
+        play('click');
+        openJoinGame();
+    });
     $('soundToggle').addEventListener('click', () =>
     {
         state.settings.sound = !state.settings.sound;
@@ -1166,6 +1529,14 @@ function bindGame(): void
     $('backBtn').addEventListener('click', () =>
     {
         const game = state.game;
+        if (game.config.mode === 'online')
+        {
+            const conn = state.online.connection;
+            if (conn) conn.send({ t: 'bye' });
+            cleanupOnline();
+            showScreen('home');
+            return;
+        }
         if (!game.outcome && game.plies.length && state.settings.confirm)
         {
             confirmDialog('Leave this game?', 'It is saved, so you can pick it up again.', 'Save and leave', false, () =>
@@ -1224,8 +1595,15 @@ function bindGame(): void
         const loser: Side = game.config.mode === 'bot' ? game.human : turn(game);
         confirmDialog('Resign?', game.config.mode === 'bot'
             ? 'The bot takes the win.'
-            : `${sideName(loser)} gives up the game.`, 'Resign', true, () =>
+            : game.config.mode === 'online'
+                ? 'You give up the game.'
+                : `${sideName(loser)} gives up the game.`, 'Resign', true, () =>
         {
+            if (game.config.mode === 'online')
+            {
+                const conn = state.online.connection;
+                if (conn) conn.send({ t: 'resign' });
+            }
             resign(game, loser);
             render();
             finish();
@@ -1305,6 +1683,14 @@ function boot(): void
     bindGame();
     bindKeys();
     applySettings();
+    const roomParam = new URLSearchParams(location.search).get('room');
+    if (roomParam)
+    {
+        state.config.mode = 'online';
+        saveConfig(state.config);
+        // open join dialog after boot
+        window.setTimeout(() => openJoinGame(roomParam), 50);
+    }
     showScreen('home');
     requestAnimationFrame(tick);
     document.addEventListener('pointerdown', () => unlockAudio(), { once: true });
