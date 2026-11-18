@@ -102,10 +102,14 @@ export function applyTheme(theme: BoardTheme): void
 }
 
 export const LEVELS = [
-    { level: 1, name: 'Pawn', blurb: 'Learning the ropes', rating: 500 },
-    { level: 2, name: 'Knight', blurb: 'Sees a move ahead', rating: 900 },
-    { level: 3, name: 'Rook', blurb: 'Punishes loose pieces', rating: 1400 },
-    { level: 4, name: 'Queen', blurb: 'Thinks four moves deep', rating: 1900 },
+    { level: 1, name: 'Pawn', blurb: 'Learning the ropes', rating: 400 },
+    { level: 2, name: 'Knight', blurb: 'Sees a move ahead', rating: 700 },
+    { level: 3, name: 'Bishop', blurb: 'A solid club player', rating: 1000 },
+    { level: 4, name: 'Rook', blurb: 'Punishes loose pieces', rating: 1300 },
+    { level: 5, name: 'Queen', blurb: 'Thinks three moves deep', rating: 1600 },
+    { level: 6, name: 'King', blurb: 'Thinks four moves deep', rating: 1900 },
+    { level: 7, name: 'Master', blurb: 'Deep search, no mistakes', rating: 2200 },
+    { level: 8, name: 'Grandmaster', blurb: 'The strongest engine here', rating: 2500 },
 ] as const;
 
 export const TIME_CONTROLS = [

@@ -19,7 +19,7 @@ import {
     unmakeMove,
 } from './rules.js';
 
-export type BotLevel = 1 | 2 | 3 | 4;
+export type BotLevel = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
 export type BotProfile = {
     level: BotLevel;
@@ -35,9 +35,13 @@ export type BotProfile = {
 
 export const BOT_PROFILES: BotProfile[] = [
     { level: 1, name: 'Pawn', blurb: 'Just learning. Misses things.', depth: 1, nodes: 3000, wobble: 0.35, noise: 24 },
-    { level: 2, name: 'Knight', blurb: 'Sees a move or two ahead.', depth: 2, nodes: 35000, wobble: 0.12, noise: 18 },
-    { level: 3, name: 'Rook', blurb: 'Punishes loose pieces.', depth: 3, nodes: 160000, wobble: 0.02, noise: 12 },
-    { level: 4, name: 'Queen', blurb: 'Thinks four moves deep.', depth: 4, nodes: 520000, wobble: 0, noise: 7 },
+    { level: 2, name: 'Knight', blurb: 'Sees a move or two ahead.', depth: 2, nodes: 20000, wobble: 0.15, noise: 20 },
+    { level: 3, name: 'Bishop', blurb: 'A solid club player.', depth: 2, nodes: 60000, wobble: 0.08, noise: 16 },
+    { level: 4, name: 'Rook', blurb: 'Punishes loose pieces.', depth: 3, nodes: 140000, wobble: 0.03, noise: 12 },
+    { level: 5, name: 'Queen', blurb: 'Thinks three moves deep.', depth: 3, nodes: 350000, wobble: 0.01, noise: 9 },
+    { level: 6, name: 'King', blurb: 'Thinks four moves deep.', depth: 4, nodes: 700000, wobble: 0, noise: 6 },
+    { level: 7, name: 'Master', blurb: 'Deep search, no mistakes.', depth: 4, nodes: 1600000, wobble: 0, noise: 3 },
+    { level: 8, name: 'Grandmaster', blurb: 'The strongest engine here.', depth: 5, nodes: 3200000, wobble: 0, noise: 1 },
 ];
 
 export const profileFor = (level: BotLevel): BotProfile => BOT_PROFILES[level - 1] ?? BOT_PROFILES[0];

@@ -58,7 +58,7 @@ export function loadConfig() {
     const saved = readJson(SETTINGS_KEY + '.config', {});
     return {
         mode: saved.mode === 'friend' ? 'friend' : 'bot',
-        level: (saved.level === 1 || saved.level === 3 || saved.level === 4 ? saved.level : 2),
+        level: ([1, 2, 3, 4, 5, 6, 7, 8].includes(saved.level) ? saved.level : 2),
         side: saved.side === 'b' || saved.side === 'random' ? saved.side : 'w',
         minutes: typeof saved.minutes === 'number' ? saved.minutes : DEFAULT_CONFIG.minutes,
         autoFlip: saved.autoFlip !== false,
