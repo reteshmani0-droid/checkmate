@@ -5,7 +5,7 @@
  * `render()`. That keeps selection, review, the bot's turn and the clock from ever disagreeing.
  */
 import { applyMove, canUndo, clearSavedGame, createGame, currentIds, currentPosition, flag, isHumanTurn, lastMove, loadConfig, loadSettings, loadStats, recordResult, resign, restoreGame, saveConfig, saveGame, saveSettings, savedGame, toPgn, turn, undo, } from './game.js';
-import { clonePosition, fromUci, hasLegalMove, inCheck, legalMovesFrom, makeMove, other, positionFromFen, START_FEN, toFen, toUci, } from './rules.js';
+import { clonePosition, fromUci, hasLegalMove, inCheck, legalMovesFrom, makeMove, other, positionFromFen, START_FEN, toFen, toSan, toUci, } from './rules.js';
 import { chooseMove, hintMove } from './bot.js';
 import { createRng } from './rng.js';
 import { makeCode, host, guest } from './net.js';
@@ -34,6 +34,8 @@ const state = {
     botToken: 0,
     resultShown: false,
     recorded: false,
+    evalCp: 0,
+    lastSearch: null,
     /** online-play state */
     online: {
         role: null,
@@ -58,7 +60,7 @@ function ensureWorker() {
             if (!resolve)
                 return;
             pending.delete(event.data.id);
-            resolve({ uci: event.data.uci ?? null });
+            resolve({ uci: event.data.uci ?? null, depth: event.data.depth, nodes: event.data.nodes, score: event.data.score, ms: event.data.ms });
         };
         worker.onerror = () => {
             workerBroken = true;
@@ -81,18 +83,18 @@ function askBot(kind, fen, level = 1) {
         return new Promise(resolve => {
             const id = ++workerSeq;
             let settled = false;
-            const settle = (uci) => {
+            const settle = (reply) => {
                 if (settled)
                     return;
                 settled = true;
                 window.clearTimeout(guard);
                 pending.delete(id);
-                resolve(uci);
+                resolve(reply);
             };
             const guard = window.setTimeout(() => {
                 settle(searchInline(kind, fen, level));
             }, 12000);
-            pending.set(id, reply => settle(reply.uci));
+            pending.set(id, reply => settle(reply));
             w.postMessage({ id, kind, fen, level, seed: (Math.random() * 1e9) | 0 });
         });
     }
@@ -100,17 +102,18 @@ function askBot(kind, fen, level = 1) {
 }
 /** The same search on this thread, for when a worker cannot start. */
 function searchInline(kind, fen, level) {
+    const started = performance.now();
     try {
         const pos = positionFromFen(fen);
         if (kind === 'hint') {
             const move = hintMove(pos);
-            return move ? toUci(move) : null;
+            return { uci: move ? toUci(move) : null, ms: performance.now() - started };
         }
         const choice = chooseMove(pos, level, createRng((Math.random() * 1e9) | 0));
-        return choice ? toUci(choice.move) : null;
+        return { uci: choice ? toUci(choice.move) : null, depth: choice?.depth, nodes: choice?.nodes, score: choice?.score, ms: performance.now() - started };
     }
     catch {
-        return null;
+        return { uci: null, ms: performance.now() - started };
     }
 }
 /* ------------------------------------------------------------------ board */
@@ -174,6 +177,12 @@ function applySettings() {
     applyTheme(themeOf(state.settings.theme));
     setSound(state.settings.sound);
     document.documentElement.dataset.coords = state.settings.coordinates ? 'on' : 'off';
+    const evalBar = document.getElementById('evalBar');
+    if (evalBar)
+        evalBar.hidden = !state.settings.coach && !state.settings.debug;
+    const debug = document.getElementById('debugPanel');
+    if (debug)
+        debug.hidden = !state.settings.debug;
 }
 function showScreen(screen) {
     state.screen = screen;
@@ -199,6 +208,7 @@ function render() {
     renderClocks();
     renderControls();
     renderMoveList();
+    renderDebug();
 }
 function renderStatus() {
     const game = state.game;
@@ -329,6 +339,38 @@ function seatHtml(side, game) {
     </div>`;
 }
 const clockCache = { w: '', b: '' };
+function renderEvalBar() {
+    const fill = document.getElementById('evalFill');
+    const label = document.getElementById('evalLabel');
+    if (!fill)
+        return;
+    const cp = Math.max(-800, Math.min(800, state.evalCp));
+    const pct = 50 + (cp / 800) * 40;
+    fill.style.height = `${pct}%`;
+    if (label)
+        label.textContent = `${cp >= 0 ? '+' : ''}${(cp / 100).toFixed(1)}`;
+}
+function renderDebug() {
+    const panel = document.getElementById('debugPanel');
+    if (!panel)
+        return;
+    panel.hidden = !state.settings.debug;
+    const ls = state.lastSearch;
+    if (ls) {
+        const d = document.getElementById('dbgDepth');
+        if (d)
+            d.textContent = String(ls.depth);
+        const n = document.getElementById('dbgNodes');
+        if (n)
+            n.textContent = ls.nodes.toLocaleString();
+        const s = document.getElementById('dbgScore');
+        if (s)
+            s.textContent = (ls.score / 100).toFixed(2);
+        const m = document.getElementById('dbgMs');
+        if (m)
+            m.textContent = ls.ms.toFixed(0);
+    }
+}
 function renderClocks() {
     const game = state.game;
     const clocks = displayClocks(game);
@@ -456,6 +498,10 @@ function renderHome() {
         });
     }
     ($('autoFlipSwitch')).checked = config.autoFlip;
+    const slider = $('levelSlider');
+    if (slider) {
+        slider.value = String(config.level);
+    }
     $('themeRow').innerHTML = THEMES.map(theme => `
         <button class="theme-dot ${state.settings.theme === theme.id ? 'is-on' : ''}" data-theme="${theme.id}"
             title="${theme.name}" aria-label="${theme.name} board">
@@ -855,6 +901,47 @@ function commitMove(move, byBot, remote = false) {
         if ((!byBot || game.config.mode === 'friend') && game.config.mode !== 'online')
             maybeBotMove();
     }
+    if (!byBot && !remote && state.settings.coach && game.config.mode !== 'online') {
+        void runCoach(before, move, game);
+    }
+}
+async function runCoach(before, played, game) {
+    try {
+        const level = Math.min(game.config.level, 3);
+        const rng = createRng(1);
+        const bestChoice = chooseMove(before, level, rng);
+        const bestUci = bestChoice ? toUci(bestChoice.move) : null;
+        const bestScore = bestChoice ? bestChoice.score : 0;
+        const after = clonePosition(before);
+        makeMove(after, played);
+        const oppChoice = chooseMove(after, level, createRng(2));
+        const playedScore = oppChoice ? -oppChoice.score : 0;
+        const diff = bestScore - playedScore;
+        let label;
+        if (bestUci && toUci(played) === bestUci)
+            label = 'Best move';
+        else if (diff <= 40)
+            label = 'Good move';
+        else if (diff <= 120)
+            label = 'Inaccuracy';
+        else if (diff <= 300)
+            label = 'Mistake';
+        else
+            label = 'Blunder';
+        let bestText = '';
+        if (bestUci && toUci(played) !== bestUci) {
+            const bestMove = fromUci(before, bestUci);
+            if (bestMove)
+                bestText = ` · best was ${toSan(before, bestMove)}`;
+        }
+        const evalText = `${playedScore >= 0 ? '+' : ''}${(playedScore / 100).toFixed(1)}`;
+        toast(`${label}${bestText} (${evalText})`);
+        state.evalCp = playedScore;
+        renderEvalBar();
+    }
+    catch {
+        /* ignore */
+    }
 }
 function finish() {
     const game = state.game;
@@ -892,8 +979,12 @@ function maybeBotMove() {
     const fen = toFen(currentPosition(game));
     const level = game.config.level;
     const started = performance.now();
-    void askBot('move', fen, level).then(uci => {
-        const wait = Math.max(0, 420 - (performance.now() - started));
+    void askBot('move', fen, level).then(reply => {
+        const uci = reply.uci;
+        state.lastSearch = { depth: reply.depth ?? 0, nodes: reply.nodes ?? 0, score: reply.score ?? 0, ms: reply.ms ?? 0 };
+        const elapsed = performance.now() - started;
+        const base = 320 + Math.random() * 620 + state.game.config.level * 90;
+        const wait = Math.max(260, base - elapsed);
         window.setTimeout(() => {
             if (token !== state.botToken || state.screen !== 'game')
                 return;
@@ -1164,6 +1255,20 @@ function openMenu() {
                     <span class="switch__track"><span class="switch__knob"></span></span>
                 </span>
             </label>
+            <label class="menu__row">
+                <span class="menu__label">Coach (move comments)</span>
+                <span class="switch switch--row">
+                    <input type="checkbox" data-coach ${settings.coach ? 'checked' : ''}>
+                    <span class="switch__track"><span class="switch__knob"></span></span>
+                </span>
+            </label>
+            <label class="menu__row">
+                <span class="menu__label">Debug (engine stats)</span>
+                <span class="switch switch--row">
+                    <input type="checkbox" data-debug ${settings.debug ? 'checked' : ''}>
+                    <span class="switch__track"><span class="switch__knob"></span></span>
+                </span>
+            </label>
             <div class="menu__row menu__row--stack">
                 <button class="btn btn--subtle btn--block" data-copy-pgn>${icon('copy', 16)} Copy PGN</button>
                 <button class="btn btn--subtle btn--block" data-copy-fen>${icon('copy', 16)} Copy position (FEN)</button>
@@ -1196,6 +1301,18 @@ function openMenu() {
     dialog.querySelector('[data-confirm]')?.addEventListener('change', event => {
         state.settings.confirm = event.target.checked;
         saveSettings(state.settings);
+    });
+    dialog.querySelector('[data-coach]')?.addEventListener('change', event => {
+        state.settings.coach = event.target.checked;
+        saveSettings(state.settings);
+        applySettings();
+        render();
+    });
+    dialog.querySelector('[data-debug]')?.addEventListener('change', event => {
+        state.settings.debug = event.target.checked;
+        saveSettings(state.settings);
+        applySettings();
+        render();
     });
     dialog.querySelector('[data-copy-pgn]')?.addEventListener('click', () => copyText(toPgn(state.game), 'PGN copied'));
     dialog.querySelector('[data-copy-fen]')?.addEventListener('click', () => copyText(toFen(currentPosition(state.game)), 'Position copied'));
@@ -1232,6 +1349,13 @@ function bindHome() {
     $('autoFlipSwitch').addEventListener('change', event => {
         state.config.autoFlip = event.target.checked;
         saveConfig(state.config);
+    });
+    $('levelSlider')?.addEventListener('input', event => {
+        const level = Number(event.target.value);
+        state.config.level = level;
+        saveConfig(state.config);
+        play('click');
+        renderHome();
     });
     $('startBtn').addEventListener('click', () => {
         unlockAudio();
@@ -1303,7 +1427,8 @@ function bindGame() {
             return;
         play('click');
         const fen = toFen(currentPosition(game));
-        void askBot('hint', fen, game.config.level).then(uci => {
+        void askBot('hint', fen, game.config.level).then(reply => {
+            const uci = reply.uci;
             if (state.game !== game || !interactive() || !uci)
                 return;
             const move = fromUci(currentPosition(game), uci);
@@ -1339,6 +1464,22 @@ function bindGame() {
         });
     });
     $('menuBtn').addEventListener('click', openMenu);
+    document.getElementById('analyzeBtn')?.addEventListener('click', () => {
+        const game = state.game;
+        const fen = toFen(currentPosition(game));
+        const level = game.config.level;
+        void askBot('move', fen, level).then(reply => {
+            state.lastSearch = { depth: reply.depth ?? 0, nodes: reply.nodes ?? 0, score: reply.score ?? 0, ms: reply.ms ?? 0 };
+            if (reply.uci) {
+                const move = fromUci(currentPosition(game), reply.uci);
+                if (move) {
+                    const san = toSan(currentPosition(game), move);
+                    toast(`Analysis: ${san} (${((reply.nodes ?? 0) / 1000).toFixed(1)}k nodes)`);
+                }
+            }
+            renderDebug();
+        });
+    });
     $('reviewLive').addEventListener('click', () => setReview(null));
     $('reviewBack').addEventListener('click', () => setReview(Math.max(0, (state.review ?? state.game.plies.length) - 1)));
     $('reviewNext').addEventListener('click', () => {

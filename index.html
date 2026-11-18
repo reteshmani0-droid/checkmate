@@ -35,6 +35,13 @@
 
                 <div id="botOptions">
                     <div class="levels" id="levelCards"></div>
+                    <div class="field">
+                        <span class="label">Engine strength</span>
+                        <input type="range" id="levelSlider" min="1" max="4" step="1" value="2" class="slider">
+                        <div class="slider__labels">
+                            <span>Pawn</span><span>Knight</span><span>Rook</span><span>Queen</span>
+                        </div>
+                    </div>
 
                     <div class="field">
                         <span class="label">Play as</span>
@@ -113,6 +120,19 @@
             </div>
 
             <div class="resultbanner" id="resultBanner" hidden></div>
+
+            <div class="evalbar" id="evalBar" hidden>
+                <div class="evalbar__fill" id="evalFill"></div>
+                <span class="evalbar__label" id="evalLabel">0.0</span>
+            </div>
+
+            <div class="debug" id="debugPanel" hidden>
+                <div><b>depth</b> <span id="dbgDepth">-</span></div>
+                <div><b>nodes</b> <span id="dbgNodes">-</span></div>
+                <div><b>score</b> <span id="dbgScore">-</span></div>
+                <div><b>ms</b> <span id="dbgMs">-</span></div>
+                <button class="btn btn--subtle btn--sm" id="analyzeBtn">Analyze</button>
+            </div>
 
             <div class="moves">
                 <ol class="moves__list" id="moveList"></ol>

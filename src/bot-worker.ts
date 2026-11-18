@@ -34,6 +34,7 @@ scope.onmessage = (event: MessageEvent<Request>): void =>
             uci: choice ? toUci(choice.move) : null,
             depth: choice?.depth ?? 0,
             nodes: choice?.nodes ?? 0,
+            score: choice?.score ?? 0,
             ms: performance.now() - started,
         });
     }

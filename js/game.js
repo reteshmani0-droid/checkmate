@@ -20,6 +20,8 @@ export const DEFAULT_SETTINGS = {
     sound: true,
     coordinates: true,
     confirm: true,
+    coach: false,
+    debug: false,
 };
 function readJson(key, fallback) {
     try {
@@ -45,6 +47,8 @@ export function loadSettings() {
         sound: saved.sound !== false,
         coordinates: saved.coordinates !== false,
         confirm: saved.confirm !== false,
+        coach: saved.coach === true,
+        debug: saved.debug === true,
     };
 }
 export function saveSettings(settings) {

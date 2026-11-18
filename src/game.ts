@@ -43,6 +43,10 @@ export type Settings = {
     coordinates: boolean;
     /** ask before resigning or leaving a game in progress */
     confirm: boolean;
+    /** show move-by-move coaching after your moves */
+    coach: boolean;
+    /** show engine stats and an analysis button */
+    debug: boolean;
 };
 
 export type Clocks = { w: number; b: number };
@@ -91,6 +95,8 @@ export const DEFAULT_SETTINGS: Settings = {
     sound: true,
     coordinates: true,
     confirm: true,
+    coach: false,
+    debug: false,
 };
 
 function readJson<T>(key: string, fallback: T): T
@@ -121,6 +127,8 @@ export function loadSettings(): Settings
         sound: saved.sound !== false,
         coordinates: saved.coordinates !== false,
         confirm: saved.confirm !== false,
+        coach: saved.coach === true,
+        debug: saved.debug === true,
     };
 }
 

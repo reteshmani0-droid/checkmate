@@ -36,6 +36,7 @@ import {
 import {
     type Move,
     type PieceType,
+    type Position,
     clonePosition,
     fromUci,
     hasLegalMove,
@@ -46,6 +47,7 @@ import {
     positionFromFen,
     START_FEN,
     toFen,
+    toSan,
     toUci,
 } from './rules.js';
 import { chooseMove, hintMove, type BotLevel } from './bot.js';
@@ -80,6 +82,8 @@ const state = {
     botToken: 0,
     resultShown: false,
     recorded: false,
+    evalCp: 0,
+    lastSearch: null as { depth: number; nodes: number; score: number; ms: number } | null,
     /** online-play state */
     online: {
         role: null as 'host' | 'guest' | null,
@@ -93,7 +97,7 @@ const state = {
 
 /* ------------------------------------------------------------------ worker */
 
-type BotReply = { uci: string | null };
+type BotReply = { uci: string | null; depth?: number; nodes?: number; score?: number; ms?: number };
 
 let worker: Worker | null = null;
 let workerBroken = false;
@@ -106,12 +110,12 @@ function ensureWorker(): Worker | null
     try
     {
         worker = new Worker(new URL('./bot-worker.js', import.meta.url), { type: 'module' });
-        worker.onmessage = (event: MessageEvent<{ id: number; uci: string | null }>): void =>
+        worker.onmessage = (event: MessageEvent<{ id: number; uci: string | null; depth?: number; nodes?: number; score?: number; ms?: number }>): void =>
         {
             const resolve = pending.get(event.data.id);
             if (!resolve) return;
             pending.delete(event.data.id);
-            resolve({ uci: event.data.uci ?? null });
+            resolve({ uci: event.data.uci ?? null, depth: event.data.depth, nodes: event.data.nodes, score: event.data.score, ms: event.data.ms });
         };
         worker.onerror = (): void =>
         {
@@ -130,28 +134,28 @@ function ensureWorker(): Worker | null
 }
 
 /** Ask the bot for a move (or a hint) without blocking the board. */
-function askBot(kind: 'move' | 'hint', fen: string, level: BotLevel = 1): Promise<string | null>
+function askBot(kind: 'move' | 'hint', fen: string, level: BotLevel = 1): Promise<BotReply>
 {
     const w = ensureWorker();
     if (w)
     {
-        return new Promise<string | null>(resolve =>
+        return new Promise<BotReply>(resolve =>
         {
             const id = ++workerSeq;
             let settled = false;
-            const settle = (uci: string | null): void =>
+            const settle = (reply: BotReply): void =>
             {
                 if (settled) return;
                 settled = true;
                 window.clearTimeout(guard);
                 pending.delete(id);
-                resolve(uci);
+                resolve(reply);
             };
             const guard = window.setTimeout(() =>
             {
                 settle(searchInline(kind, fen, level));
             }, 12000);
-            pending.set(id, reply => settle(reply.uci));
+            pending.set(id, reply => settle(reply));
             w.postMessage({ id, kind, fen, level, seed: (Math.random() * 1e9) | 0 });
         });
     }
@@ -159,22 +163,23 @@ function askBot(kind: 'move' | 'hint', fen: string, level: BotLevel = 1): Promis
 }
 
 /** The same search on this thread, for when a worker cannot start. */
-function searchInline(kind: 'move' | 'hint', fen: string, level: BotLevel): string | null
+function searchInline(kind: 'move' | 'hint', fen: string, level: BotLevel): BotReply
 {
+    const started = performance.now();
     try
     {
         const pos = positionFromFen(fen);
         if (kind === 'hint')
         {
             const move = hintMove(pos);
-            return move ? toUci(move) : null;
+            return { uci: move ? toUci(move) : null, ms: performance.now() - started };
         }
         const choice = chooseMove(pos, level, createRng((Math.random() * 1e9) | 0));
-        return choice ? toUci(choice.move) : null;
+        return { uci: choice ? toUci(choice.move) : null, depth: choice?.depth, nodes: choice?.nodes, score: choice?.score, ms: performance.now() - started };
     }
     catch
     {
-        return null;
+        return { uci: null, ms: performance.now() - started };
     }
 }
 
@@ -253,6 +258,10 @@ function applySettings(): void
     applyTheme(themeOf(state.settings.theme));
     setSound(state.settings.sound);
     document.documentElement.dataset.coords = state.settings.coordinates ? 'on' : 'off';
+    const evalBar = document.getElementById('evalBar');
+    if (evalBar) evalBar.hidden = !state.settings.coach && !state.settings.debug;
+    const debug = document.getElementById('debugPanel');
+    if (debug) debug.hidden = !state.settings.debug;
 }
 
 function showScreen(screen: Screen): void
@@ -282,6 +291,7 @@ function render(): void
     renderClocks();
     renderControls();
     renderMoveList();
+    renderDebug();
 }
 
 function renderStatus(): void
@@ -432,6 +442,32 @@ function seatHtml(side: Side, game: Game): string
 }
 
 const clockCache: Record<Side, string> = { w: '', b: '' };
+
+function renderEvalBar(): void
+{
+    const fill = document.getElementById('evalFill');
+    const label = document.getElementById('evalLabel');
+    if (!fill) return;
+    const cp = Math.max(-800, Math.min(800, state.evalCp));
+    const pct = 50 + (cp / 800) * 40;
+    fill.style.height = `${pct}%`;
+    if (label) label.textContent = `${cp >= 0 ? '+' : ''}${(cp / 100).toFixed(1)}`;
+}
+
+function renderDebug(): void
+{
+    const panel = document.getElementById('debugPanel');
+    if (!panel) return;
+    panel.hidden = !state.settings.debug;
+    const ls = state.lastSearch;
+    if (ls)
+    {
+        const d = document.getElementById('dbgDepth'); if (d) d.textContent = String(ls.depth);
+        const n = document.getElementById('dbgNodes'); if (n) n.textContent = ls.nodes.toLocaleString();
+        const s = document.getElementById('dbgScore'); if (s) s.textContent = (ls.score / 100).toFixed(2);
+        const m = document.getElementById('dbgMs'); if (m) m.textContent = ls.ms.toFixed(0);
+    }
+}
 
 function renderClocks(): void
 {
@@ -591,6 +627,8 @@ function renderHome(): void
     }
 
     ($<HTMLInputElement>('autoFlipSwitch')).checked = config.autoFlip;
+    const slider = $<HTMLInputElement>('levelSlider');
+    if (slider) { slider.value = String(config.level); }
 
     $('themeRow').innerHTML = THEMES.map(theme => `
         <button class="theme-dot ${state.settings.theme === theme.id ? 'is-on' : ''}" data-theme="${theme.id}"
@@ -1048,6 +1086,54 @@ function commitMove(move: Move, byBot: boolean, remote = false): void
         if (game.config.mode === 'online' && !byBot && !remote) sendOnlineMove(move);
         if ((!byBot || game.config.mode === 'friend') && game.config.mode !== 'online') maybeBotMove();
     }
+
+    if (!byBot && !remote && state.settings.coach && game.config.mode !== 'online')
+    {
+        void runCoach(before, move, game);
+    }
+}
+
+async function runCoach(before: Position, played: Move, game: Game): Promise<void>
+{
+    try
+    {
+        const level = Math.min(game.config.level, 3) as BotLevel;
+        const rng = createRng(1);
+        const bestChoice = chooseMove(before, level, rng);
+        const bestUci = bestChoice ? toUci(bestChoice.move) : null;
+        const bestScore = bestChoice ? bestChoice.score : 0;
+
+        const after = clonePosition(before);
+        makeMove(after, played);
+        const oppChoice = chooseMove(after, level, createRng(2));
+        const playedScore = oppChoice ? -oppChoice.score : 0;
+
+        const diff = bestScore - playedScore;
+
+        let label: string;
+        if (bestUci && toUci(played) === bestUci) label = 'Best move';
+        else if (diff <= 40) label = 'Good move';
+        else if (diff <= 120) label = 'Inaccuracy';
+        else if (diff <= 300) label = 'Mistake';
+        else label = 'Blunder';
+
+        let bestText = '';
+        if (bestUci && toUci(played) !== bestUci)
+        {
+            const bestMove = fromUci(before, bestUci);
+            if (bestMove) bestText = ` · best was ${toSan(before, bestMove)}`;
+        }
+
+        const evalText = `${playedScore >= 0 ? '+' : ''}${(playedScore / 100).toFixed(1)}`;
+        toast(`${label}${bestText} (${evalText})`);
+
+        state.evalCp = playedScore;
+        renderEvalBar();
+    }
+    catch
+    {
+        /* ignore */
+    }
 }
 
 function finish(): void
@@ -1087,9 +1173,13 @@ function maybeBotMove(): void
     const level = game.config.level;
     const started = performance.now();
 
-    void askBot('move', fen, level).then(uci =>
+    void askBot('move', fen, level).then(reply =>
     {
-        const wait = Math.max(0, 420 - (performance.now() - started));
+        const uci = reply.uci;
+        state.lastSearch = { depth: reply.depth ?? 0, nodes: reply.nodes ?? 0, score: reply.score ?? 0, ms: reply.ms ?? 0 };
+        const elapsed = performance.now() - started;
+        const base = 320 + Math.random() * 620 + state.game.config.level * 90;
+        const wait = Math.max(260, base - elapsed);
         window.setTimeout(() =>
         {
             if (token !== state.botToken || state.screen !== 'game') return;
@@ -1403,6 +1493,20 @@ function openMenu(): void
                     <span class="switch__track"><span class="switch__knob"></span></span>
                 </span>
             </label>
+            <label class="menu__row">
+                <span class="menu__label">Coach (move comments)</span>
+                <span class="switch switch--row">
+                    <input type="checkbox" data-coach ${settings.coach ? 'checked' : ''}>
+                    <span class="switch__track"><span class="switch__knob"></span></span>
+                </span>
+            </label>
+            <label class="menu__row">
+                <span class="menu__label">Debug (engine stats)</span>
+                <span class="switch switch--row">
+                    <input type="checkbox" data-debug ${settings.debug ? 'checked' : ''}>
+                    <span class="switch__track"><span class="switch__knob"></span></span>
+                </span>
+            </label>
             <div class="menu__row menu__row--stack">
                 <button class="btn btn--subtle btn--block" data-copy-pgn>${icon('copy', 16)} Copy PGN</button>
                 <button class="btn btn--subtle btn--block" data-copy-fen>${icon('copy', 16)} Copy position (FEN)</button>
@@ -1440,6 +1544,20 @@ function openMenu(): void
     {
         state.settings.confirm = (event.target as HTMLInputElement).checked;
         saveSettings(state.settings);
+    });
+    dialog.querySelector<HTMLInputElement>('[data-coach]')?.addEventListener('change', event =>
+    {
+        state.settings.coach = (event.target as HTMLInputElement).checked;
+        saveSettings(state.settings);
+        applySettings();
+        render();
+    });
+    dialog.querySelector<HTMLInputElement>('[data-debug]')?.addEventListener('change', event =>
+    {
+        state.settings.debug = (event.target as HTMLInputElement).checked;
+        saveSettings(state.settings);
+        applySettings();
+        render();
     });
     dialog.querySelector('[data-copy-pgn]')?.addEventListener('click', () => copyText(toPgn(state.game), 'PGN copied'));
     dialog.querySelector('[data-copy-fen]')?.addEventListener('click', () =>
@@ -1487,6 +1605,15 @@ function bindHome(): void
     {
         state.config.autoFlip = (event.target as HTMLInputElement).checked;
         saveConfig(state.config);
+    });
+
+    $('levelSlider')?.addEventListener('input', event =>
+    {
+        const level = Number((event.target as HTMLInputElement).value) as BotLevel;
+        state.config.level = level;
+        saveConfig(state.config);
+        play('click');
+        renderHome();
     });
     $('startBtn').addEventListener('click', () =>
     {
@@ -1571,8 +1698,9 @@ function bindGame(): void
         if (!interactive()) return;
         play('click');
         const fen = toFen(currentPosition(game));
-        void askBot('hint', fen, game.config.level).then(uci =>
+        void askBot('hint', fen, game.config.level).then(reply =>
         {
+            const uci = reply.uci;
             if (state.game !== game || !interactive() || !uci) return;
             const move = fromUci(currentPosition(game), uci);
             if (!move) return;
@@ -1611,6 +1739,27 @@ function bindGame(): void
     });
 
     $('menuBtn').addEventListener('click', openMenu);
+
+    document.getElementById('analyzeBtn')?.addEventListener('click', () =>
+    {
+        const game = state.game;
+        const fen = toFen(currentPosition(game));
+        const level = game.config.level;
+        void askBot('move', fen, level).then(reply =>
+        {
+            state.lastSearch = { depth: reply.depth ?? 0, nodes: reply.nodes ?? 0, score: reply.score ?? 0, ms: reply.ms ?? 0 };
+            if (reply.uci)
+            {
+                const move = fromUci(currentPosition(game), reply.uci);
+                if (move)
+                {
+                    const san = toSan(currentPosition(game), move);
+                    toast(`Analysis: ${san} (${((reply.nodes ?? 0) / 1000).toFixed(1)}k nodes)`);
+                }
+            }
+            renderDebug();
+        });
+    });
 
     $('reviewLive').addEventListener('click', () => setReview(null));
     $('reviewBack').addEventListener('click', () => setReview(Math.max(0, (state.review ?? state.game.plies.length) - 1)));
