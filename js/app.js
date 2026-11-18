@@ -36,6 +36,7 @@ const state = {
     recorded: false,
     evalCp: 0,
     lastSearch: null,
+    arrow: null,
     /** online-play state */
     online: {
         role: null,
@@ -137,6 +138,62 @@ function interactive() {
 }
 /* ------------------------------------------------------------------ helpers */
 const sideName = (side) => (side === 'w' ? 'White' : 'Black');
+/* ------------------------------------------------------------------ openings */
+const OPENINGS = [
+    { moves: ['e4', 'e5', 'Nf3', 'Nc6', 'Bb5'], name: 'Ruy Lopez' },
+    { moves: ['e4', 'e5', 'Nf3', 'Nc6', 'Bb5', 'a6'], name: 'Ruy Lopez, Morphy Defense' },
+    { moves: ['e4', 'e5', 'Nf3', 'Nc6', 'Bc4'], name: 'Italian Game' },
+    { moves: ['e4', 'e5', 'Nf3', 'Nc6', 'Bc4', 'Bc5'], name: 'Giuoco Piano' },
+    { moves: ['e4', 'e5', 'Nf3', 'Nc6', 'Bc4', 'Nf6'], name: 'Two Knights Defense' },
+    { moves: ['e4', 'e5', 'Nf3', 'Nc6', 'd4'], name: 'Scotch Game' },
+    { moves: ['e4', 'e5', 'Nf3', 'Nf6'], name: 'Petrov Defense' },
+    { moves: ['e4', 'e5', 'f4'], name: 'King\'s Gambit' },
+    { moves: ['e4', 'c5'], name: 'Sicilian Defense' },
+    { moves: ['e4', 'c5', 'Nf3', 'd6', 'd4', 'cxd4', 'Nxd4', 'Nf6', 'Nc3', 'a6'], name: 'Sicilian, Najdorf' },
+    { moves: ['e4', 'c5', 'Nf3', 'Nc6', 'd4', 'cxd4', 'Nxd4'], name: 'Sicilian, Open' },
+    { moves: ['e4', 'e6'], name: 'French Defense' },
+    { moves: ['e4', 'c6'], name: 'Caro-Kann Defense' },
+    { moves: ['e4', 'd5'], name: 'Scandinavian Defense' },
+    { moves: ['e4', 'd6'], name: 'Pirc Defense' },
+    { moves: ['e4', 'g6'], name: 'Modern Defense' },
+    { moves: ['d4', 'd5', 'c4'], name: 'Queen\'s Gambit' },
+    { moves: ['d4', 'd5', 'c4', 'dxc4'], name: 'Queen\'s Gambit Accepted' },
+    { moves: ['d4', 'd5', 'c4', 'e6'], name: 'Queen\'s Gambit Declined' },
+    { moves: ['d4', 'd5', 'c4', 'c6'], name: 'Slav Defense' },
+    { moves: ['d4', 'Nf6', 'c4', 'g6'], name: 'King\'s Indian Defense' },
+    { moves: ['d4', 'Nf6', 'c4', 'e6', 'Nc3', 'Bb4'], name: 'Nimzo-Indian Defense' },
+    { moves: ['d4', 'Nf6', 'c4', 'e6', 'g3'], name: 'Catalan Opening' },
+    { moves: ['d4', 'Nf6', 'c4', 'c5'], name: "Benoni Defense" },
+    { moves: ['Nf3'], name: 'Reti Opening' },
+    { moves: ['c4'], name: 'English Opening' },
+    { moves: ['g3'], name: 'King\'s Fianchetto' },
+    { moves: ['b3'], name: 'Larsen Opening' },
+];
+function openingName(game) {
+    if (!game.plies.length)
+        return null;
+    const sans = game.plies.map(p => p.san);
+    let best = null;
+    let bestLen = 0;
+    for (const opening of OPENINGS) {
+        if (opening.moves.length > sans.length)
+            continue;
+        if (opening.moves.length <= bestLen)
+            continue;
+        let ok = true;
+        for (let i = 0; i < opening.moves.length; i++) {
+            if (opening.moves[i] !== sans[i]) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) {
+            best = opening.name;
+            bestLen = opening.moves.length;
+        }
+    }
+    return best;
+}
 const sideValue = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
 function formatClock(seconds) {
     const safe = Math.max(0, seconds);
@@ -215,6 +272,7 @@ function renderStatus() {
     const status = $('statusLine');
     let text;
     let tone = '';
+    const opening = !game.outcome && state.review === null ? openingName(game) : null;
     if (state.review !== null) {
         text = `Reviewing · ${game.plies[state.review].san}`;
         tone = 'review';
@@ -233,6 +291,8 @@ function renderStatus() {
         const checked = inCheck(currentPosition(game));
         text = checked ? `Check · ${sideName(turn(game))} to move` : `${sideName(turn(game))} to move`;
     }
+    if (opening && !state.thinking && !game.outcome)
+        text = `${text} · ${opening}`;
     status.textContent = text;
     status.dataset.tone = tone;
 }
@@ -251,6 +311,7 @@ function renderBoard() {
         targets: state.targets,
         check: checked,
         hint: game.hint,
+        arrow: state.arrow,
         theme: themeOf(state.settings.theme),
         coordinates: state.settings.coordinates,
         interactive: interactive(),
@@ -537,6 +598,7 @@ function resetGameFlags() {
     state.thinking = false;
     state.resultShown = false;
     state.recorded = false;
+    state.arrow = null;
     state.botToken++;
 }
 let onlinePingTimer = null;
@@ -581,6 +643,9 @@ function startGame(config) {
     closeDialog();
     showScreen('game');
     maybeBotMove();
+    if ((state.settings.coach || state.settings.debug) && state.game.config.mode !== 'online') {
+        void computeArrow(state.game);
+    }
 }
 function rematch() {
     closeDialog();
@@ -806,6 +871,9 @@ function continueSaved() {
     closeDialog();
     showScreen('game');
     maybeBotMove();
+    if ((state.settings.coach || state.settings.debug) && state.game.config.mode !== 'online') {
+        void computeArrow(state.game);
+    }
 }
 function setReview(index) {
     state.review = index;
@@ -884,6 +952,7 @@ function commitMove(move, byBot, remote = false) {
     state.selected = null;
     state.targets = [];
     state.review = null;
+    state.arrow = null;
     if (remote)
         play(evaluateSound(move, checked && !mate));
     else if (!byBot)
@@ -900,6 +969,9 @@ function commitMove(move, byBot, remote = false) {
             sendOnlineMove(move);
         if ((!byBot || game.config.mode === 'friend') && game.config.mode !== 'online')
             maybeBotMove();
+        if ((state.settings.coach || state.settings.debug) && game.config.mode !== 'online') {
+            void computeArrow(game);
+        }
     }
     if (!byBot && !remote && state.settings.coach && game.config.mode !== 'online') {
         void runCoach(before, move, game);
@@ -943,6 +1015,22 @@ async function runCoach(before, played, game) {
         /* ignore */
     }
 }
+async function computeArrow(game) {
+    try {
+        const level = Math.min(game.config.level, 3);
+        const reply = await askBot('move', toFen(currentPosition(game)), level);
+        if (state.game !== game)
+            return;
+        if (reply.uci) {
+            const move = fromUci(currentPosition(game), reply.uci);
+            if (move) {
+                state.arrow = { from: move.from, to: move.to };
+                renderBoard();
+            }
+        }
+    }
+    catch { /* ignore */ }
+}
 function finish() {
     const game = state.game;
     if (!game.outcome)
@@ -952,11 +1040,14 @@ function finish() {
         state.recorded = true;
         recordResult(game);
     }
+    const isWin = outcomeIsWin(game);
     window.setTimeout(() => {
         if (state.game !== game || game.outcome === null || state.resultShown)
             return;
-        if (outcomeIsWin(game))
+        if (isWin) {
             play('win');
+            celebrate();
+        }
         else if (outcomeIsLoss(game))
             play('lose');
         else
@@ -964,6 +1055,57 @@ function finish() {
         state.resultShown = true;
         openResult();
     }, 620);
+}
+function celebrate() {
+    const canvas = document.createElement('canvas');
+    canvas.style.position = 'fixed';
+    canvas.style.inset = '0';
+    canvas.style.pointerEvents = 'none';
+    canvas.style.zIndex = '9999';
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    document.body.append(canvas);
+    const ctx = canvas.getContext('2d');
+    const colors = ['#81B64C', '#F0D9B5', '#FFD700', '#FF6B6B', '#4ECDC4', '#A78BFA'];
+    const pieces = [];
+    for (let i = 0; i < 120; i++) {
+        pieces.push({
+            x: canvas.width / 2,
+            y: canvas.height / 3,
+            vx: (Math.random() - 0.5) * 12,
+            vy: Math.random() * -14 - 4,
+            r: Math.random() * 6 + 3,
+            c: colors[Math.floor(Math.random() * colors.length)],
+            life: 1,
+        });
+    }
+    let frame = 0;
+    const tick = () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        let alive = false;
+        for (const p of pieces) {
+            p.vy += 0.4;
+            p.x += p.vx;
+            p.y += p.vy;
+            p.vx *= 0.99;
+            p.life -= 0.012;
+            if (p.life <= 0 || p.y > canvas.height)
+                continue;
+            alive = true;
+            ctx.globalAlpha = Math.max(0, p.life);
+            ctx.fillStyle = p.c;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        frame++;
+        if (alive && frame < 240)
+            requestAnimationFrame(tick);
+        else
+            canvas.remove();
+    };
+    requestAnimationFrame(tick);
 }
 function maybeBotMove() {
     const game = state.game;
@@ -1089,6 +1231,60 @@ function openPromotion(options) {
         });
     }
 }
+async function analyzeGame(game) {
+    openDialog(`
+        ${dialogHeader('Analyzing…', 'Running the engine on every move.')}
+        <div class="online__wait"><span id="analyzeProgress">0 / ${Math.ceil(game.plies.length / 2)}</span></div>`, { dimissible: false });
+    const level = Math.min(game.config.level, 3);
+    let blunders = 0, mistakes = 0, inaccuracies = 0, good = 0;
+    let worst = null;
+    const total = Math.ceil(game.plies.length / 2);
+    // replay
+    const replay = createGame(game.config, game.startFen, game.human);
+    let before = game.startPos;
+    for (let i = 0; i < game.plies.length; i++) {
+        const ply = game.plies[i];
+        const bc = chooseMove(before, level, createRng(1));
+        const bestUci = bc ? toUci(bc.move) : null;
+        const bestScore = bc ? bc.score : 0;
+        const after = clonePosition(before);
+        makeMove(after, ply.move);
+        const opp = chooseMove(after, level, createRng(2));
+        const playedScore = opp ? -opp.score : 0;
+        const diff = bestScore - playedScore;
+        if (bestUci && toUci(ply.move) !== bestUci) {
+            if (diff > 300) {
+                blunders++;
+            }
+            else if (diff > 120) {
+                mistakes++;
+            }
+            else if (diff > 40) {
+                inaccuracies++;
+            }
+            else {
+                good++;
+            }
+            if (!worst || diff > worst.diff)
+                worst = { ply: i, san: ply.san, diff, best: bestUci };
+        }
+        else
+            good++;
+        applyMove(replay, ply.move);
+        before = after;
+        const progress = document.getElementById('analyzeProgress');
+        if (progress)
+            progress.textContent = `${Math.floor(i / 2) + 1} / ${total}`;
+        await new Promise(r => window.setTimeout(r, 0));
+    }
+    const summary = `Good: ${good}  Inaccuracies: ${inaccuracies}  Mistakes: ${mistakes}  Blunders: ${blunders}` +
+        (worst ? `\nWorst: ${worst.san} (move ${Math.floor(worst.ply / 2) + 1}) · best was ${worst.best}` : '');
+    closeDialog();
+    openDialog(`
+        ${dialogHeader('Game analysis', summary.replace(/\n/g, '<br>'))}
+        <button class="btn btn--primary btn--block" data-close>OK</button>`, { dimissible: true });
+    document.querySelector('[data-close]')?.addEventListener('click', () => closeDialog());
+}
 function openResult() {
     const game = state.game;
     if (!game.outcome)
@@ -1108,6 +1304,7 @@ function openResult() {
         <div class="result__actions">
             <button class="btn btn--primary btn--block" data-rematch>Rematch</button>
             <button class="btn btn--subtle btn--block" data-review>Review the game</button>
+            <button class="btn btn--subtle btn--block" data-analyze>${icon('bulb', 16)} Analyze game</button>
             <div class="result__row">
                 <button class="btn btn--ghost" data-copy>${icon('copy', 16)} Copy PGN</button>
                 <button class="btn btn--ghost" data-home>${icon('back', 16)} Home</button>
@@ -1118,6 +1315,10 @@ function openResult() {
         closeDialog();
         if (game.plies.length)
             setReview(game.plies.length - 1);
+    });
+    overlay.querySelector('[data-analyze]')?.addEventListener('click', () => {
+        closeDialog();
+        void analyzeGame(game);
     });
     overlay.querySelector('[data-home]')?.addEventListener('click', () => {
         closeDialog();

@@ -19,6 +19,7 @@ export type BoardState = {
     /** the square of a king in check, or null */
     check: number | null;
     hint: { from: number; to: number } | null;
+    arrow: { from: number; to: number } | null;
     theme: BoardTheme;
     coordinates: boolean;
     /** dims the pieces and stops the pointer, for a finished or reviewed game */
@@ -285,6 +286,49 @@ export class Board
 
         // The coordinate layer sits above the squares, so it is redrawn with them.
         this.layoutCoordinates();
+
+        // Engine best-move arrow (coach/debug).
+        if (state.arrow)
+        {
+            const from = this.colRow(state.arrow.from);
+            const to = this.colRow(state.arrow.to);
+            const size = this.squareSize();
+            const fx = (from.col + 0.5) * size;
+            const fy = (from.row + 0.5) * size;
+            const tx = (to.col + 0.5) * size;
+            const ty = (to.row + 0.5) * size;
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('class', 'board__arrow');
+            svg.setAttribute('width', String(size * 8));
+            svg.setAttribute('height', String(size * 8));
+            svg.style.position = 'absolute';
+            svg.style.inset = '0';
+            svg.style.pointerEvents = 'none';
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line.setAttribute('x1', String(fx));
+            line.setAttribute('y1', String(fy));
+            line.setAttribute('x2', String(tx));
+            line.setAttribute('y2', String(ty));
+            line.setAttribute('stroke', 'rgba(96, 178, 255, 0.85)');
+            line.setAttribute('stroke-width', String(size * 0.18));
+            line.setAttribute('stroke-linecap', 'round');
+            line.setAttribute('marker-end', 'url(#arrowhead)');
+            const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+            const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+            marker.setAttribute('id', 'arrowhead');
+            marker.setAttribute('markerWidth', '10');
+            marker.setAttribute('markerHeight', '7');
+            marker.setAttribute('refX', '9');
+            marker.setAttribute('refY', '3.5');
+            marker.setAttribute('orient', 'auto');
+            const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+            poly.setAttribute('points', '0 0, 10 3.5, 0 7');
+            poly.setAttribute('fill', 'rgba(96, 178, 255, 0.85)');
+            marker.append(poly);
+            defs.append(marker);
+            svg.append(defs, line);
+            this.marks.append(svg);
+        }
     }
 
     /* ---------------------------------------------------------------- pointer */
